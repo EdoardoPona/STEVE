@@ -1,4 +1,3 @@
-""" same as V_0 but WRAE and STEVE in one file  """
 
 import numpy as np
 import torch
