@@ -1,4 +1,4 @@
-
+""" Word encoder and sentence encoder both work. The TSN layer in the middle does not. """
 import numpy as np
 import torch
 import torch.nn as nn
@@ -40,7 +40,7 @@ class WordDecoder(nn.Module):
 
     def forward(self, hidden):
 
-        next_in = Variable(torch.ones(1, hidden.shape[1], embedding_size))         # SOS character
+        next_in = Variable(torch.ones(1, hidden.shape[1], embedding_size)).cuda()         # SOS character
         outputs = []
 
         for i in range(max_word_len):
@@ -80,15 +80,23 @@ class SentenceDecoder(nn.Module):
         self.rnn = nn.GRU(word_decoder_size, sentence_decoder_size, bidirectional=False, batch_first=False)
         self.linear = nn.Linear(sentence_decoder_size, word_decoder_size)
 
-    def forward(self, hidden):
+    def forward(self, hidden, correct_outputs=None):
 
-        next_in = Variable(torch.ones(1, hidden.shape[1], word_decoder_size))         # SOS character
+        next_in = Variable(torch.ones(1, hidden.shape[1], word_decoder_size)).cuda()         # SOS character
         outputs = []
 
-        for i in range(max_sentence_len):
-            next_in, hidden = self.rnn(next_in, hidden)
-            next_in = self.linear(next_in)
-            outputs.append(word_decoder(next_in))
+        if correct_outputs is None:
+            for i in range(max_sentence_len):
+                next_in, hidden = self.rnn(next_in, hidden)
+                next_in = self.linear(next_in)
+                outputs.append(word_decoder(next_in))
+        else:
+            for i in range(max_sentence_len):
+                out, hidden = self.rnn(next_in, hidden)
+                out = self.linear(out)
+                outputs.append(word_decoder(out))
+
+                next_in = correct_outputs[i].unsqueeze(0)
 
         # outputs = torch.cat(outputs, dim=0)
         return outputs, hidden
@@ -109,92 +117,16 @@ class LinearTSN(nn.Module):
         return out
 
 
-def train0(iter_num):
-    """ training everything, including word encoder, together """
-    for i in range(int(iter_num)):
-        batch, targets = helper.get_sentence_batch(20)
-
-        h = sentence_encoder(batch)
-        o, _ = sentence_decoder(h)
-
-        cost = helper.get_loss(o, targets)
-        cost.backward()
-
-        w_e_optim.step()
-        w_d_optim.step()
-        s_e_optim.step()
-        s_d_optim.step()
-
-        w_e_optim.zero_grad()
-        w_d_optim.zero_grad()
-        s_e_optim.zero_grad()
-        s_d_optim.zero_grad()
-
-        if i % 500 == 0:
-            print('step', i, 'cost', cost.data[0])
-
-            word_list = [word_batch[:, 0].data for word_batch in o]
-            example_phrase = ''
-            for word in word_list:
-                example_phrase += helper.id_vec2seq([np.argmax(vec) for vec in word]) + ' '
-            print(example_phrase)
-
-            word_list = [helper.one_hot(torch.squeeze(target, dim=0), helper.vocab_size).data for target in targets]
-            example_phrase = ''
-            for word in word_list:
-                example_phrase += helper.id_vec2seq([np.argmax(vec) for vec in word]) + ' '
-            print(example_phrase)
-
-
-def train1(wrae_iter_num, steve_iter_num):
-
-    # training WRAE
-    for i in range(int(wrae_iter_num)):
-        batch = helper.get_word_batch(20)
-
-        _, e_hidden = word_encoder(batch)
-        out = word_decoder(batch)
-
-        cost = helper.get_word_loss(out, batch)
-
-        w_e_optim.step()
-        w_d_optim.step()
-
-        w_e_optim.zero_grad()
-        w_d_optim.zero_grad()
-
-        if i % 500 == 0:
-            print('step', i, 'cost', cost.data[0])
-
-    # training seq2seq with the sentence vectors
-    for i in range(int(steve_iter_num)):
-        batch, targets = helper.get_sentence_batch(20)
-
-        h = sentence_encoder(batch)
-        o, _ = sentence_decoder(h)
-
-        cost = helper.get_loss(o, targets)
-        cost.backward()
-
-        s_e_optim.step()
-        s_d_optim.step()
-
-        s_e_optim.zero_grad()
-        s_d_optim.zero_grad()
-
-        if i % 500 == 0:
-            print('step', i, 'cost', cost.data[0])
-
-
 def train_WRAE(iter_num):
     """ training WordRecurrentAutoEncoder for word embeddings """
     for i in range(int(iter_num)):
-        batch = Variable(torch.from_numpy(helper.get_word_batch(20))).long()
+        batch = Variable(torch.from_numpy(helper.get_word_batch(100))).long().cuda()
 
         _, e_hidden = word_encoder(batch)
         out = word_decoder(e_hidden)
 
         cost = helper.get_word_loss(out, helper.one_hot(batch, helper.vocab_size))
+        cost.backward()
 
         w_e_optim.step()
         w_d_optim.step()
@@ -202,22 +134,23 @@ def train_WRAE(iter_num):
         w_e_optim.zero_grad()
         w_d_optim.zero_grad()
 
-        if i % 1 == 0:
+        if i % 500 == 0:
             print('step', i, 'cost', cost.data[0])
+
+        if i % 1000 == 0:
+            print(helper.id_vec2seq(batch[:, 0].data), 'to', helper.id_vec2seq([np.argmax(vec) for vec in out[:, 0].data]))
+
+        if i % 2000 == 0:
             torch.save(word_encoder.state_dict(), 'w_e')
+            torch.save(word_decoder.state_dict(), 'w_d')
 
 
-def train_TSN(wrae_iter_num, srae_iter_num, tsn_iter_num):
-    """ hopefully this is the masterpiece """
-    # training WRAE
-    train_WRAE(wrae_iter_num)
+def train_SRAE(iter_num):
 
-    # training SentenceRecurrentAutoEncoder
-    for i in range(int(srae_iter_num)):
+    for i in range(int(iter_num)):
         batch, _ = helper.get_sentence_batch(20)
 
         targets = [word_batch for word_batch in batch]
-        print(targets[0].shape)
 
         h = sentence_encoder(batch)
         o, _ = sentence_decoder(h)
@@ -234,9 +167,29 @@ def train_TSN(wrae_iter_num, srae_iter_num, tsn_iter_num):
         if i % 500 == 0:
             print('step', i, 'cost', cost.data[0])
 
+        if i % 2000 == 0:
+            torch.save(sentence_encoder.state_dict(), 's_e')
+            torch.save(sentence_decoder.state_dict(), 's_d')
+
+            word_list = [word_batch[:, 0].data for word_batch in o]
+            example_phrase = ''
+            for word in word_list:
+                example_phrase += helper.id_vec2seq([np.argmax(vec) for vec in word]) + ' '
+            print(example_phrase)
+
+            word_list = [helper.one_hot(torch.squeeze(target, dim=0), helper.vocab_size).data for target in targets]
+            example_phrase = ''
+            for word in word_list:
+                example_phrase += helper.id_vec2seq([np.argmax(vec) for vec in word]) + ' '
+            print(example_phrase)
+
+
+def train_TSN(tsn_iter_num):
+    """ hopefully this is the masterpiece """
+
     # training tsn network
     for i in range(int(tsn_iter_num)):
-        batch, targets = helper.get_sentence_batch(20)
+        batch, targets = helper.get_sentence_batch(50)
 
         in_meaning = sentence_encoder(batch)
         ans_meaning = linear_tsn(in_meaning)
@@ -246,15 +199,30 @@ def train_TSN(wrae_iter_num, srae_iter_num, tsn_iter_num):
         cost.backward()
 
         linear_tsn_optim.step()
-
         linear_tsn_optim.zero_grad()
 
-        if i % 1 == 0:
+        if i % 500 == 0:
             print('step', i, 'cost', cost.data[0])
+
+        if i % 2000 == 0:
+            torch.save(linear_tsn.state_dict(), 'linear_tsn')
+
+            word_list = [word_batch[:, 0].data for word_batch in o]
+            example_phrase = ''
+            for word in word_list:
+                example_phrase += helper.id_vec2seq([np.argmax(vec) for vec in word]) + ' '
+            print(example_phrase)
+
+            word_list = [helper.one_hot(torch.squeeze(target, dim=0), helper.vocab_size).data for target in targets]
+            example_phrase = ''
+            for word in word_list:
+                example_phrase += helper.id_vec2seq([np.argmax(vec) for vec in word]) + ' '
+            print(example_phrase)
+
 
 
 max_word_len = 10
-max_sentence_len = 45         # in words
+max_sentence_len = 120         # in words
 helper = Helper.Helper('data.txt', max_sentence_len, max_word_len)
 vocab_size = helper.vocab_size
 embedding_size = 80
@@ -262,27 +230,27 @@ embedding_size = 80
 word_encoder_size = 75
 word_decoder_size = word_encoder_size * 4
 
-sentence_encoder_size = 350
+sentence_encoder_size = 700
 sentence_decoder_size = sentence_encoder_size * 4
 
-word_encoder = WordEncoder()
-word_decoder = WordDecoder(word_encoder.embeddings)
-sentence_encoder = SentenceEncoder()
-sentence_decoder = SentenceDecoder()
-linear_tsn = LinearTSN()
-
-word_encoder.load_state_dict(torch.load('w_e'))
-word_encoder.state
-"""word_encoder = torch.load('w_e')
-word_decoder = torch.load('w_d')
-sentence_encoder = torch.load('s_e')
-sentence_decoder = torch.load('s_d')
-linear_tsn = LinearTSN()"""
+word_encoder = WordEncoder().cuda()
+word_decoder = WordDecoder(word_encoder.embeddings).cuda()
+sentence_encoder = SentenceEncoder().cuda()
+sentence_decoder = SentenceDecoder().cuda()
+linear_tsn = LinearTSN().cuda()
 
 w_e_optim = optim.Adam(word_encoder.parameters(), lr=1e-3)
 w_d_optim = optim.Adam(word_decoder.parameters(), lr=1e-3)
-s_e_optim = optim.Adam(sentence_encoder.parameters(), lr=5e-4)
-s_d_optim = optim.Adam(sentence_decoder.parameters(), lr=5e-4)
-linear_tsn_optim = optim.Adam(linear_tsn.parameters(), lr=1e-4)
+s_e_optim = optim.Adam(sentence_encoder.parameters(), lr=2e-5)
+s_d_optim = optim.Adam(sentence_decoder.parameters(), lr=2e-5)
+linear_tsn_optim = optim.Adam(linear_tsn.parameters(), lr=2e-5)
 
-train_TSN(1, 1, 1)
+word_encoder.load_state_dict(torch.load('w_e'))
+word_decoder.load_state_dict(torch.load('w_d'))
+
+sentence_encoder.load_state_dict(torch.load('s_e'))
+sentence_decoder.load_state_dict(torch.load('s_d'))
+
+linear_tsn.load_state_dict(torch.load('linear_tsn'))
+
+train_TSN(2e5)
